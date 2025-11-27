@@ -45,6 +45,77 @@ jobs:
         if: ${{ failure() }}
         run: cat test-suite.log
 
+  # Новый job для сборки под x64 и x86
+  linux-multiarch:
+    runs-on: ubuntu-18.04
+    strategy:
+      matrix:
+        arch: [x64, x86]
+        config:
+          - "--enable-debug --enable-cuckoo --enable-magic --enable-macho --enable-pb-tests"
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf \
+            automake \
+            gcc-multilib \
+            g++-multilib \
+            libtool \
+            libjansson-dev \
+            libmagic-dev \
+            libssl-dev \
+            protobuf-compiler \
+            protobuf-c-compiler \
+            libprotobuf-c-dev
+      - name: Install 32-bit libraries for x86
+        if: matrix.arch == 'x86'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y \
+            libjansson-dev:i386 \
+            libmagic-dev:i386 \
+            libssl-dev:i386 \
+            libprotobuf-c-dev:i386
+      - name: Print versions
+        run: |
+          bison --version
+          gcc --version
+          if [ "${{ matrix.arch }}" = "x86" ]; then
+            echo "Building for x86 (32-bit)"
+          else
+            echo "Building for x64 (64-bit)"
+          fi
+      - name: Prepare for building
+        run: |
+          ./bootstrap.sh
+          if [ "${{ matrix.arch }}" = "x86" ]; then
+            CFLAGS="-m32" CXXFLAGS="-m32" LDFLAGS="-m32" ./configure ${{ matrix.config }}
+          else
+            ./configure ${{ matrix.config }}
+          fi
+      - name: Build
+        run: make clean && make
+      - name: Check binary architecture
+        run: |
+          if [ -f "yara" ]; then
+            file yara
+          elif [ -f "yara.exe" ]; then
+            file yara.exe
+          else
+            echo "Binary not found, listing build directory:"
+            ls -la
+          fi
+      - name: Run tests (x64 only)
+        if: matrix.arch == 'x64'
+        run: make check
+      - name: Print tests errors
+        if: ${{ failure() && matrix.arch == 'x64' }}
+        run: cat test-suite.log
+
   mingw-build:
     runs-on: ubuntu-latest
     strategy:
@@ -69,6 +140,14 @@ jobs:
           ./configure ${{ matrix.config }}
       - name: Build
         run: make clean && make
+      - name: Check Windows binaries
+        run: |
+          if [ -f "yara.exe" ]; then
+            file yara.exe
+          else
+            echo "yara.exe not found, listing build directory:"
+            ls -la
+          fi
 
   macosx-build:
     runs-on: macos-13
@@ -127,3 +206,58 @@ jobs:
             make check &&
             cat test-suite.log
             "
+
+  # Дополнительный job для создания релизных бинарников
+  release-binaries:
+    runs-on: ubuntu-18.04
+    if: startsWith(github.ref, 'refs/tags/')
+    strategy:
+      matrix:
+        arch: [x64, x86]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf \
+            automake \
+            gcc-multilib \
+            g++-multilib \
+            libtool \
+            libjansson-dev \
+            libmagic-dev \
+            libssl-dev \
+            protobuf-compiler \
+            protobuf-c-compiler \
+            libprotobuf-c-dev
+      - name: Install 32-bit libraries for x86
+        if: matrix.arch == 'x86'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y \
+            libjansson-dev:i386 \
+            libmagic-dev:i386 \
+            libssl-dev:i386 \
+            libprotobuf-c-dev:i386
+      - name: Build release binary
+        run: |
+          ./bootstrap.sh
+          if [ "${{ matrix.arch }}" = "x86" ]; then
+            CFLAGS="-m32 -O2" CXXFLAGS="-m32 -O2" LDFLAGS="-m32" ./configure --enable-cuckoo --enable-magic --enable-macho
+          else
+            ./configure --enable-cuckoo --enable-magic --enable-macho
+          fi
+          make clean && make
+      - name: Package binary
+        run: |
+          if [ -f "yara" ]; then
+            strip yara || true
+            tar czf yara-${{ github.ref_name }}-linux-${{ matrix.arch }}.tar.gz yara
+          fi
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: yara-${{ github.ref_name }}-linux-${{ matrix.arch }}
+          path: yara-${{ github.ref_name }}-linux-${{ matrix.arch }}.tar.gz
